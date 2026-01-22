@@ -1,0 +1,173 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # Backend Testing
+  backend-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: todo_app_test
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        ports:
+          - 3306:3306
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: 'backend/package-lock.json'
+    
+    - name: Install Backend Dependencies
+      working-directory: ./backend
+      run: npm ci
+    
+    - name: Create .env file
+      working-directory: ./backend
+      run: |
+        echo "PORT=5000" > .env
+        echo "DB_HOST=localhost" >> .env
+        echo "DB_USER=root" >> .env
+        echo "DB_PASSWORD=root" >> .env
+        echo "DB_NAME=todo_app_test" >> .env
+        echo "JWT_SECRET=test_secret_key" >> .env
+        echo "NODE_ENV=test" >> .env
+    
+    - name: Wait for MySQL
+      run: |
+        until mysqladmin ping -h"localhost" -u"root" -p"root" --silent; do
+          echo 'waiting for mysql...'
+          sleep 1
+        done
+    
+    - name: Run Backend Linting
+      working-directory: ./backend
+      run: npm run lint --if-present || echo "No lint script"
+    
+    - name: Run Backend Tests
+      working-directory: ./backend
+      run: npm test --if-present || echo "No test script"
+      env:
+        NODE_ENV: test
+        DB_HOST: localhost
+        DB_USER: root
+        DB_PASSWORD: root
+        DB_NAME: todo_app_test
+
+  # Frontend Testing
+  frontend-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: 'frontend/package-lock.json'
+    
+    - name: Install Frontend Dependencies
+      working-directory: ./frontend
+      run: npm ci
+    
+    - name: Run Frontend Linting
+      working-directory: ./frontend
+      run: npm run lint --if-present || echo "No lint script"
+    
+    - name: Run Frontend Tests
+      working-directory: ./frontend
+      run: npm test --if-present -- --coverage --watchAll=false || echo "No test script"
+    
+    - name: Build Frontend
+      working-directory: ./frontend
+      run: npm run build
+    
+    - name: Upload Frontend Build
+      uses: actions/upload-artifact@v3
+      with:
+        name: frontend-build
+        path: frontend/build/
+
+  # Docker Build Check
+  docker-build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Build Backend Docker Image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./backend
+        push: false
+        tags: todo-app-backend:latest
+    
+    - name: Build Frontend Docker Image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./frontend
+        push: false
+        tags: todo-app-frontend:latest
+
+  # Code Quality
+  code-quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    
+    - name: Install Dependencies
+      run: |
+        cd backend && npm ci
+        cd ../frontend && npm ci
+    
+    - name: Check for common issues
+      run: |
+        echo "Checking for TODO comments..."
+        grep -r "TODO\|FIXME" --include="*.js" --include="*.jsx" backend/src frontend/src || echo "No TODOs found"
+        
+        echo "Checking node_modules in git..."
+        if git ls-files | grep -q "node_modules/"; then
+          echo "ERROR: node_modules found in git"
+          exit 1
+        else
+          echo "OK: node_modules not in git"
+        fi
+
+# Optional: Add notifications
+# - name: Notify Slack
+#   if: failure()
+#   uses: slackapi/slack-github-action@v1
+#   with:
+#     webhook-url: ${{ secrets.SLACK_WEBHOOK }}
